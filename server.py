@@ -12,12 +12,26 @@ PORT = 3000
 DATA_FILE = 'storage/data.json'
 
 # Ініціалізація Jinja2
-TEMPLATES_PATH = os.path.join(os.path.dirname(__file__), 'templates')
-STATIC_PATH = os.path.join(os.path.dirname(__file__), 'static')
+BASE_DIR = os.path.dirname(__file__)
+TEMPLATES_PATH = os.path.join(BASE_DIR, 'templates')
+STATIC_PATH = os.path.join(BASE_DIR, 'static')
+
 env = Environment(loader=FileSystemLoader(TEMPLATES_PATH))
 
 
+# Перевірка існування необхідних файлів і папок
+if not os.path.exists('storage'):
+    os.makedirs('storage')
+if not os.path.exists(DATA_FILE):
+    with open(DATA_FILE, 'w') as f:
+        json.dump({}, f)
+
+
 class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
+    """
+    Клас для обробки HTTP-запитів.
+    """
+
     def do_GET(self):
         routes = {
             '/': 'index.html.jinja2',
@@ -30,7 +44,9 @@ class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
             if self.path == '/read':
                 with open(DATA_FILE, 'r') as f:
                     messages = json.load(f)
-                content = template.render(messages=messages)
+                # Сортуємо повідомлення за часом у зворотному порядку
+                sorted_messages = dict(sorted(messages.items(), key=lambda x: x[0], reverse=True))
+                content = template.render(messages=sorted_messages)
             else:
                 content = template.render()
             self._send_response(200, content)
@@ -65,12 +81,18 @@ class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_response(404, 'Not Found')
 
     def _send_response(self, status, content):
+        """
+        Відправка HTML-відповіді клієнту.
+        """
         self.send_response(status)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
         self.wfile.write(content.encode('utf-8'))
 
     def _serve_static(self):
+        """
+        Обробка статичних файлів.
+        """
         file_path = os.path.join(STATIC_PATH, os.path.basename(self.path))
         if os.path.exists(file_path):
             self.send_response(200)
@@ -85,13 +107,23 @@ class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_response(404, 'Static File Not Found')
 
     def _redirect(self, location):
+        """
+        Перенаправлення клієнта на іншу сторінку.
+        """
         self.send_response(303)
         self.send_header('Location', location)
         self.end_headers()
 
 
-# Багатопотоковий запуск сервера
-httpd = HTTPServer((HOST, PORT), CustomHTTPRequestHandler)
-server = Thread(target=httpd.serve_forever)
-server.start()
-print(f"Serving on http://{HOST}:{PORT}")
+# Запуск сервера у багатопоточному режимі
+if __name__ == '__main__':
+    try:
+        httpd = HTTPServer((HOST, PORT), CustomHTTPRequestHandler)
+        server = Thread(target=httpd.serve_forever)
+        server.start()
+        print(f"🚀 Server is running on http://{HOST}:{PORT}")
+    except KeyboardInterrupt:
+        print("\n🛑 Server is stopping...")
+        httpd.shutdown()
+        server.join()
+        print("✅ Server has been stopped.")
