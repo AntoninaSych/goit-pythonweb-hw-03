@@ -5,33 +5,26 @@ from threading import Thread
 import json
 from datetime import datetime
 from urllib.parse import parse_qs
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import time
 
-# Конфігурація
+# 🛠️ Configuration
 HOST = '0.0.0.0'
 PORT = 3000
 DATA_FILE = 'storage/data.json'
 
-# Ініціалізація Jinja2
+# 🖥️ Paths
 BASE_DIR = os.path.dirname(__file__)
 TEMPLATES_PATH = os.path.join(BASE_DIR, 'templates')
 STATIC_PATH = os.path.join(BASE_DIR, 'static')
 
+# 🖌️ Jinja2 Environment
 env = Environment(loader=FileSystemLoader(TEMPLATES_PATH))
 
 
-# Перевірка існування необхідних файлів і папок
-if not os.path.exists('storage'):
-    os.makedirs('storage')
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, 'w') as f:
-        json.dump({}, f)
-
-
+# 📝 HTTP Request Handler
 class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
-    """
-    Клас для обробки HTTP-запитів.
-    """
-
     def do_GET(self):
         routes = {
             '/': 'index.html.jinja2',
@@ -44,9 +37,11 @@ class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
             if self.path == '/read':
                 with open(DATA_FILE, 'r') as f:
                     messages = json.load(f)
-                # Сортуємо повідомлення за часом у зворотному порядку
-                sorted_messages = dict(sorted(messages.items(), key=lambda x: x[0], reverse=True))
-                content = template.render(messages=sorted_messages)
+                formatted_messages = {
+                    datetime.fromisoformat(ts).strftime('%B %d, %Y, %I:%M %p'): msg
+                    for ts, msg in sorted(messages.items(), key=lambda x: x[0], reverse=True)
+                }
+                content = template.render(messages=formatted_messages)
             else:
                 content = template.render()
             self._send_response(200, content)
@@ -59,7 +54,7 @@ class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path == '/message':
-            content_length = int(self.headers['Content-Length'])
+            content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             data = parse_qs(post_data.decode('utf-8'))
 
@@ -81,18 +76,12 @@ class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_response(404, 'Not Found')
 
     def _send_response(self, status, content):
-        """
-        Відправка HTML-відповіді клієнту.
-        """
         self.send_response(status)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
         self.wfile.write(content.encode('utf-8'))
 
     def _serve_static(self):
-        """
-        Обробка статичних файлів.
-        """
         file_path = os.path.join(STATIC_PATH, os.path.basename(self.path))
         if os.path.exists(file_path):
             self.send_response(200)
@@ -107,23 +96,41 @@ class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
             self._send_response(404, 'Static File Not Found')
 
     def _redirect(self, location):
-        """
-        Перенаправлення клієнта на іншу сторінку.
-        """
         self.send_response(303)
         self.send_header('Location', location)
         self.end_headers()
 
 
-# Запуск сервера у багатопоточному режимі
+# 👀 Watchdog for Live Updates
+class FileChangeHandler(FileSystemEventHandler):
+    def on_modified(self, event):
+        if event.src_path.endswith(".jinja2") or event.src_path.endswith(".css"):
+            print(f"🔄 File changed: {event.src_path}")
+            global env
+            env = Environment(loader=FileSystemLoader(TEMPLATES_PATH))
+
+
+# 🚀 Start Server
 if __name__ == '__main__':
     try:
         httpd = HTTPServer((HOST, PORT), CustomHTTPRequestHandler)
         server = Thread(target=httpd.serve_forever)
         server.start()
         print(f"🚀 Server is running on http://{HOST}:{PORT}")
+
+        # Start Watchdog
+        observer = Observer()
+        observer.schedule(FileChangeHandler(), path=TEMPLATES_PATH, recursive=True)
+        observer.schedule(FileChangeHandler(), path=STATIC_PATH, recursive=True)
+        observer.start()
+        print("👀 Watching for file changes...")
+
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
-        print("\n🛑 Server is stopping...")
+        print("\n🛑 Shutting down the server...")
+        observer.stop()
         httpd.shutdown()
         server.join()
-        print("✅ Server has been stopped.")
+        observer.join()
+        print("✅ Server stopped.")
