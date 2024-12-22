@@ -1,52 +1,51 @@
-import http.server
-import socketserver
-import urllib.parse
+from jinja2 import Environment, FileSystemLoader
+import os
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from threading import Thread
 import json
 from datetime import datetime
-import os
+from urllib.parse import parse_qs
 
-# Параметри сервера
+# Конфігурація
+HOST = '0.0.0.0'
 PORT = 3000
 DATA_FILE = 'storage/data.json'
 
-# Перевірка наявності data.json
-if not os.path.exists('storage'):
-    os.makedirs('storage')
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, 'w') as f:
-        json.dump({}, f)
+# Ініціалізація Jinja2
+TEMPLATES_PATH = os.path.join(os.path.dirname(__file__), 'templates')
+STATIC_PATH = os.path.join(os.path.dirname(__file__), 'static')
+env = Environment(loader=FileSystemLoader(TEMPLATES_PATH))
 
 
-class CustomHandler(http.server.SimpleHTTPRequestHandler):
+class CustomHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        """
-        Обробка GET-запитів.
-        """
-        if self.path == '/':
-            self.path = 'index.html'
-        elif self.path == '/message.html':
-            self.path = 'message.html'
-        elif self.path == '/error.html':
-            self.path = 'error.html'
-        elif self.path == '/read':
-            self.show_messages()
-            return
-        elif self.path in ['/style.css', '/logo.png']:
-            pass  # Обробка статичних файлів
-        else:
-            self.path = 'error.html'
-            self.send_response(404)
+        routes = {
+            '/': 'index.html.jinja2',
+            '/message.html': 'message.html.jinja2',
+            '/read': 'read.html.jinja2',
+        }
 
-        return http.server.SimpleHTTPRequestHandler.do_GET(self)
+        if self.path in routes:
+            template = env.get_template(routes[self.path])
+            if self.path == '/read':
+                with open(DATA_FILE, 'r') as f:
+                    messages = json.load(f)
+                content = template.render(messages=messages)
+            else:
+                content = template.render()
+            self._send_response(200, content)
+        elif self.path.startswith('/static/'):
+            self._serve_static()
+        else:
+            template = env.get_template('error.html.jinja2')
+            content = template.render()
+            self._send_response(404, content)
 
     def do_POST(self):
-        """
-        Обробка POST-запитів для форми.
-        """
         if self.path == '/message':
             content_length = int(self.headers['Content-Length'])
             post_data = self.rfile.read(content_length)
-            data = urllib.parse.parse_qs(post_data.decode('utf-8'))
+            data = parse_qs(post_data.decode('utf-8'))
 
             username = data.get('username', [''])[0]
             message = data.get('message', [''])[0]
@@ -59,72 +58,40 @@ class CustomHandler(http.server.SimpleHTTPRequestHandler):
                     f.seek(0)
                     json.dump(stored_data, f, indent=4)
 
-                self.send_response(303)
-                self.send_header('Location', '/')
-                self.end_headers()
+                self._redirect('/')
             else:
-                self.send_error(400, "Both 'username' and 'message' fields are required")
+                self._send_response(400, 'Bad Request: Missing username or message')
         else:
-            self.send_error(404)
+            self._send_response(404, 'Not Found')
 
-    def show_messages(self):
-        """
-        Відображення збережених повідомлень зі стилями.
-        """
-        with open(DATA_FILE, 'r') as f:
-            messages = json.load(f)
-
-        response_content = f"""
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Messages</title>
-            <link rel="stylesheet" href="/style.css">
-            <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.2/dist/css/bootstrap.min.css" rel="stylesheet">
-        </head>
-        <body>
-            <header>
-                <nav class="navbar navbar-expand navbar-dark bg-dark">
-                    <div class="container-fluid">
-                        <a class="navbar-brand" href="/">
-                            <img src="/logo.png" alt="logo" height="30">
-                        </a>
-                        <ul class="navbar-nav me-auto">
-                            <li class="nav-item"><a class="nav-link" href="/">Home</a></li>
-                            <li class="nav-item"><a class="nav-link" href="/message.html">Send Message</a></li>
-                            <li class="nav-item"><a class="nav-link active" href="/read">View Messages</a></li>
-                        </ul>
-                    </div>
-                </nav>
-            </header>
-            <main class="container mt-4">
-                <h1 class="text-center">Saved Messages</h1>
-                <ul class="list-group">
-        """
-        for timestamp, msg in messages.items():
-            response_content += f"""
-            <li class="list-group-item">
-                <strong>{msg['username']}</strong>: {msg['message']}
-                <small class="text-muted d-block">({timestamp})</small>
-            </li>
-            """
-
-        response_content += """
-                </ul>
-            </main>
-        </body>
-        </html>
-        """
-
-        self.send_response(200)
+    def _send_response(self, status, content):
+        self.send_response(status)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
-        self.wfile.write(response_content.encode('utf-8'))
+        self.wfile.write(content.encode('utf-8'))
+
+    def _serve_static(self):
+        file_path = os.path.join(STATIC_PATH, os.path.basename(self.path))
+        if os.path.exists(file_path):
+            self.send_response(200)
+            if file_path.endswith('.css'):
+                self.send_header('Content-type', 'text/css')
+            elif file_path.endswith('.png'):
+                self.send_header('Content-type', 'image/png')
+            self.end_headers()
+            with open(file_path, 'rb') as f:
+                self.wfile.write(f.read())
+        else:
+            self._send_response(404, 'Static File Not Found')
+
+    def _redirect(self, location):
+        self.send_response(303)
+        self.send_header('Location', location)
+        self.end_headers()
 
 
-# Запуск сервера
-with socketserver.TCPServer(("", PORT), CustomHandler) as httpd:
-    print(f"Serving on port {PORT}")
-    httpd.serve_forever()
+# Багатопотоковий запуск сервера
+httpd = HTTPServer((HOST, PORT), CustomHTTPRequestHandler)
+server = Thread(target=httpd.serve_forever)
+server.start()
+print(f"Serving on http://{HOST}:{PORT}")
